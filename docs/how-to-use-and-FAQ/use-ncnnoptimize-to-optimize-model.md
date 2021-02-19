@@ -23,3 +23,6 @@ eliminate noop operator
 
 prefer better operator
 * replace convolution with innerproduct after global pooling
+
+denormals to zero
+* replace denormal numbers that cause performance degradation on specific CPUs 

@@ -89,6 +89,20 @@
 #include "layer/yolodetectionoutput.h"
 #include "layer/yolov3detectionoutput.h"
 
+static void replace_denormals_with_zero(float* data, size_t data_length)
+{
+    const int total = static_cast<int>(data_length);
+    for(size_t i = 0; i < data_length; ++i)
+    {
+        float value = data[i];
+
+        if (fabsf(value) < 1e-30 && fabsf(value) != 0.f)
+        {
+            data[i] = 0.f;
+        }
+    }
+}
+
 class DataReaderFromEmpty : public ncnn::DataReader
 {
 public:
@@ -208,6 +222,8 @@ public:
 public:
     // 0=fp32 1=fp16
     int storage_type;
+    // 0=false, 1=true
+    int use_denormals_to_zero;
 
 public:
     int fuse_batchnorm_scale();
@@ -245,6 +261,8 @@ public:
     int replace_prelu_with_leaky_relu();
     int replace_convolution_with_innerproduct_after_global_pooling();
     int replace_convolution_with_innerproduct_after_innerproduct();
+
+    int replace_denormals();
 
     int shape_inference();
     int estimate_memory_footprint();
@@ -2736,6 +2754,108 @@ int NetOptimize::replace_convolution_with_innerproduct_after_innerproduct()
     return 0;
 }
 
+int NetOptimize::replace_denormals()
+{
+    if (use_denormals_to_zero == 1)
+    {
+        fprintf(stderr, "replace_denormals_with_zero\n");
+        const size_t layer_count = layers.size();
+
+        for (size_t i = 0; i < layer_count; i++)
+        {
+            const ncnn::Layer* layer = layers[i];
+
+            if (layer->type == "BatchNorm")
+            {
+                ncnn::BatchNorm* op = (ncnn::BatchNorm*)layer;
+                const int out_channel = op->channels;
+                replace_denormals_with_zero(op->slope_data, out_channel);
+                replace_denormals_with_zero(op->mean_data, out_channel);
+                replace_denormals_with_zero(op->var_data, out_channel);
+                replace_denormals_with_zero(op->bias_data, out_channel);
+            }
+            else if (layer->type == "Bias")
+            {
+                ncnn::Bias* op = (ncnn::Bias*)layer;
+                const int bias_data_size = op->bias_data_size;
+                replace_denormals_with_zero(op->bias_data, bias_data_size);
+            }
+            else if (layer->type == "Convolution")
+            {
+                ncnn::Convolution* op = (ncnn::Convolution*)layer;
+                const int weight_data_size = op->weight_data_size;
+                const int out_channel = op->num_output;
+                replace_denormals_with_zero(op->weight_data, weight_data_size);
+                if (op->bias_term)
+                {
+                    replace_denormals_with_zero(op->bias_data, out_channel);
+                }
+            }
+            else if (layer->type == "ConvolutionDepthWise")
+            {
+                ncnn::ConvolutionDepthWise* op = (ncnn::ConvolutionDepthWise*)layer;
+                const int weight_data_size = op->weight_data_size;
+                const int out_channel = op->num_output;
+                replace_denormals_with_zero(op->weight_data, weight_data_size);
+                if (op->bias_term)
+                {
+                    replace_denormals_with_zero(op->bias_data, out_channel);
+                }
+            }
+            else if (layer->type == "Deconvolution")
+            {
+                ncnn::Deconvolution* op = (ncnn::Deconvolution*)layer;
+                const int weight_data_size = op->weight_data_size;
+                const int out_channel = op->num_output;
+                replace_denormals_with_zero(op->weight_data, weight_data_size);
+                if (op->bias_term)
+                {
+                    replace_denormals_with_zero(op->bias_data, out_channel);
+                }
+            }
+            else if (layer->type == "DeconvolutionDepthWise")
+            {
+                ncnn::DeconvolutionDepthWise* op = (ncnn::DeconvolutionDepthWise*)layer;
+                const int weight_data_size = op->weight_data_size;
+                const int out_channel = op->num_output;
+                replace_denormals_with_zero(op->weight_data, weight_data_size);
+                if (op->bias_term)
+                {
+                    replace_denormals_with_zero(op->bias_data, out_channel);
+                }
+            }
+            else if (layer->type == "InnerProduct")
+            {
+                ncnn::InnerProduct* op = (ncnn::InnerProduct*)layer;
+                const int weight_data_size = op->weight_data_size;
+                const int out_channel = op->num_output;
+                replace_denormals_with_zero(op->weight_data, weight_data_size);
+                if (op->bias_term)
+                {
+                    replace_denormals_with_zero(op->bias_data, out_channel);
+                }
+            }
+            else if (layer->type == "InstanceNorm")
+            {
+                ncnn::InstanceNorm* op = (ncnn::InstanceNorm*)layer;
+                const int out_channel = op->channels;
+                replace_denormals_with_zero(op->gamma_data, out_channel);
+                replace_denormals_with_zero(op->beta_data, out_channel);
+            }
+            else if (layer->type == "PReLU")
+            {
+                ncnn::PReLU* op = (ncnn::PReLU*)layer;
+                const int out_channel = op->num_slope;
+                replace_denormals_with_zero(op->slope_data, out_channel);
+            }
+        }
+
+        return 0;
+    }
+
+    return 0;
+}
+
 int NetOptimize::shape_inference()
 {
     if (has_custom_layer)
@@ -3986,9 +4106,9 @@ int NetOptimize::save(const char* parampath, const char* binpath)
 
 int main(int argc, char** argv)
 {
-    if (argc != 6)
+    if (argc != 7)
     {
-        fprintf(stderr, "usage: %s [inparam] [inbin] [outparam] [outbin] [flag]\n", argv[0]);
+        fprintf(stderr, "usage: %s [inparam] [inbin] [outparam] [outbin] [flag] [use_denormals_to_zero]\n", argv[0]);
         return -1;
     }
 
@@ -3997,6 +4117,7 @@ int main(int argc, char** argv)
     const char* outparam = argv[3];
     const char* outbin = argv[4];
     int flag = atoi(argv[5]);
+    int use_denormals_to_zero = atoi(argv[6]);
 
     NetOptimize optimizer;
 
@@ -4007,6 +4128,15 @@ int main(int argc, char** argv)
     else
     {
         optimizer.storage_type = 0;
+    }
+
+    if (use_denormals_to_zero == 1)
+    {
+        optimizer.use_denormals_to_zero = 1;
+    }
+    else
+    {
+        optimizer.use_denormals_to_zero = 0;
     }
 
     optimizer.load_param(inparam);
@@ -4056,6 +4186,8 @@ int main(int argc, char** argv)
 
     optimizer.eliminate_flatten_after_innerproduct();
     optimizer.eliminate_orphaned_memorydata();
+
+    optimizer.replace_denormals();
 
     optimizer.shape_inference();
 
